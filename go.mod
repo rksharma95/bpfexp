@@ -4,6 +4,7 @@ go 1.18
 
 require (
 	github.com/cilium/ebpf v0.10.0
+	github.com/davecgh/go-spew v1.1.1
 	github.com/docker/docker v20.10.17+incompatible
 	golang.org/x/sys v0.9.0
 )

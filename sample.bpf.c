@@ -11,7 +11,8 @@ typedef struct {
   u32 pid;
   u32 pid_ns;
   u32 mnt_ns;
-  char comm[256];
+  char comm[80];
+  u32 daddr;
 } event;
 
 struct {
@@ -33,42 +34,9 @@ static __always_inline u32 get_task_ns_tgid(struct task_struct *task) {
   return get_task_pid_vnr(group_leader);
 }
 
-#define DIR_PROC "/proc/"
-
-static __always_inline int isProcDir(char *path) {
-  char procDir[] = DIR_PROC;
-  int i = 0;
-  while (i < sizeof(DIR_PROC) - 1 && path[i] != '\0' && path[i] == procDir[i]) {
-    i++;
-  }
-
-  if (i == sizeof(DIR_PROC) - 1) {
-    return 1;
-  }
-
-  return 0;
-}
-
-#define FILE_ENVIRON "/environ"
-
-static __always_inline int isEnviron(char *path) {
-  char envFile[] = FILE_ENVIRON;
-  int i = 0;
-  while (i < sizeof(FILE_ENVIRON) - 1 && path[i] != '\0' &&
-         path[i] == envFile[i]) {
-    i++;
-  }
-
-  if (i == sizeof(FILE_ENVIRON) - 1) {
-    return 1;
-  }
-
-  return 0;
-}
-
-SEC("lsm/file_open")
-int BPF_PROG(enforce_file, struct file *file) {
-  // struct path f_path = BPF_CORE_READ(file, f_path);
+SEC("lsm/socket_connect")
+int BPF_PROG(enforce_soconn, struct socket *sock, struct sockaddr *address,
+             int addrlen) {
   struct task_struct *t = (struct task_struct *)bpf_get_current_task();
   u32 pid_ns = BPF_CORE_READ(t, nsproxy, pid_ns_for_children, ns).inum;
   u32 mnt_ns = BPF_CORE_READ(t, nsproxy, mnt_ns, ns).inum;
@@ -80,6 +48,26 @@ int BPF_PROG(enforce_file, struct file *file) {
   u64 id = bpf_get_current_pid_tgid();
   u32 tgid = id >> 32;
 
+  // Only IPv4 in this example
+  if (address->sa_family != 2) {
+    return 0;
+  }
+
+  // Cast the address to an IPv4 socket address
+  struct sockaddr_in *addr = (struct sockaddr_in *)address;
+
+  // Where do you want to go?
+  __u32 dest = addr->sin_addr.s_addr;
+
+  // // Only IPv4 in this example
+  // if (address->sa_family == 10) {
+  //   // Cast the address to an IPv4 socket address
+  //   struct sockaddr_in6 *addr = (struct sockaddr_in6 *)address;
+
+  //   // Where do you want to go?
+  //   __u32 dest = addr->sin6_addr.in6_u.u6_addr32;
+  //   bpf_printk("lsm: found connect to %d", dest);
+  // }
   event *task_info;
 
   task_info = bpf_ringbuf_reserve(&events, sizeof(event), 0);
@@ -90,33 +78,62 @@ int BPF_PROG(enforce_file, struct file *file) {
   task_info->pid = get_task_ns_tgid(t);
   task_info->pid_ns = pid_ns;
   task_info->mnt_ns = mnt_ns;
-  bpf_d_path(&file->f_path, task_info->comm, 256);
+  bpf_get_current_comm(&task_info->comm, sizeof(task_info->comm));
+  task_info->daddr = dest;
 
-  if (!isProcDir(task_info->comm)) {
-    bpf_ringbuf_discard(task_info, 0);
+  bpf_printk("proc %s -> %pI4", task_info->comm, dest);
+
+  bpf_ringbuf_submit(task_info, 0);
+  return 0;
+}
+
+SEC("lsm/socket_accept")
+int BPF_PROG(enforce_soacc, struct socket *sock, struct socket *newsock) {
+  struct task_struct *t = (struct task_struct *)bpf_get_current_task();
+  u32 pid_ns = BPF_CORE_READ(t, nsproxy, pid_ns_for_children, ns).inum;
+  u32 mnt_ns = BPF_CORE_READ(t, nsproxy, mnt_ns, ns).inum;
+
+  if (pid_ns == PROC_PID_INIT_INO) {
     return 0;
   }
 
-  long envpid;
-  int count =
-      bpf_strtol(task_info->comm + sizeof(DIR_PROC) - 1, 10, 0, &envpid);
-  if (count < 0) {
-    bpf_ringbuf_discard(task_info, 0);
-    return 0;
-  }
-  u8 envstart = sizeof(DIR_PROC) + count - 1;
-  if (envstart < 80 && !isEnviron(task_info->comm + envstart)) {
-    bpf_ringbuf_discard(task_info, 0);
+  u32 tgid = bpf_get_current_pid_tgid() >> 32;
+
+  // u16 family = BPF_CORE_READ(newsock, sk, __sk_common).skc_family;
+  // // Only IPv4 in this example
+  // if (family != 2) {
+  //   return 0;
+  // }
+
+  // u32 src = BPF_CORE_READ(newsock, sk, __sk_common).skc_rcv_saddr;
+
+  // // Where do you want to go?
+  // u32 dest = BPF_CORE_READ(newsock, sk, __sk_common).skc_daddr;
+
+  // // Only IPv4 in this example
+  // if (address->sa_family == 10) {
+  //   // Cast the address to an IPv4 socket address
+  //   struct sockaddr_in6 *addr = (struct sockaddr_in6 *)address;
+
+  //   // Where do you want to go?
+  //   __u32 dest = addr->sin6_addr.in6_u.u6_addr32;
+  //   bpf_printk("lsm: found connect to %d", dest);
+  // }
+  event *task_info;
+
+  task_info = bpf_ringbuf_reserve(&events, sizeof(event), 0);
+  if (!task_info) {
     return 0;
   }
 
-  if (envpid != task_info->pid) {
-    bpf_printk("pid: %d comm: %s, count: %d, new_pid: %d\n", task_info->pid,
-               task_info->comm, count, envpid);
-    bpf_ringbuf_submit(task_info, 0);
-    return -13;
-  }
+  task_info->pid = get_task_ns_tgid(t);
+  task_info->pid_ns = pid_ns;
+  task_info->mnt_ns = mnt_ns;
+  bpf_get_current_comm(&task_info->comm, sizeof(task_info->comm));
+  task_info->daddr = BPF_CORE_READ(newsock, sk, __sk_common).skc_rcv_saddr;
 
-  bpf_ringbuf_discard(task_info, 0);
+  // bpf_printk("src %pI4 -> proc %s -> %pI4", src, task_info->comm, dest);
+
+  bpf_ringbuf_submit(task_info, 0);
   return 0;
 }

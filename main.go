@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"os/signal"
 	"strconv"
@@ -26,13 +27,14 @@ import (
 	"github.com/docker/docker/client"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang bpf sample.bpf.c -target bpfel -type event -- -I/usr/include/bpf -O2 -g -D__TARGET_ARCH_x86
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang bpf sample.bpf.c -target bpfel -type event -- -I/usr/include/ -O2 -g -D__TARGET_ARCH_x86 -fno-stack-protector
 
 type eventBPF struct {
 	Pid   uint32
 	PidNS uint32
 	MntNS uint32
 	Comm  [80]uint8
+	Daddr uint32
 }
 
 // nskey Structure acts as an Identifier for containers
@@ -103,11 +105,17 @@ func main() {
 	}
 	defer objs.Close()
 
-	kp, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceFile})
+	// kpc, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSoconn})
+	// if err != nil {
+	// 	log.Fatalf("opening kprobe: %s", err)
+	// }
+	// defer kpc.Close()
+
+	kpa, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSoacc})
 	if err != nil {
 		log.Fatalf("opening kprobe: %s", err)
 	}
-	defer kp.Close()
+	defer kpa.Close()
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
@@ -124,7 +132,6 @@ func main() {
 	}()
 
 	log.Println("Waiting for events..")
-
 	var event eventBPF
 	for {
 		record, err := rd.Read()
@@ -150,11 +157,17 @@ func main() {
 		if val, ok := cmap[key]; ok {
 			val.ProcessPID = event.Pid
 			val.ProcessName = unix.ByteSliceToString(event.Comm[:])
+			ipBytes := make([]byte, 4)
+			// Fill the byte slice with the IP address in big-endian format.
+			binary.LittleEndian.PutUint32(ipBytes, event.Daddr)
+
+			// Convert the byte slice into an IP object.
+			ipAddr := net.IP(ipBytes)
 			b, err := json.MarshalIndent(val, "", "  ")
 			if err != nil {
 				fmt.Println("error:", err)
 			}
-			fmt.Print(string(b))
+			fmt.Print(string(b), ipAddr.String())
 
 		}
 
