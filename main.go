@@ -27,7 +27,7 @@ import (
 	"github.com/docker/docker/client"
 )
 
-//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang bpf sample.bpf.c -target bpfel -type event -- -I/usr/include/ -O2 -g -D__TARGET_ARCH_x86 -fno-stack-protector
+//go:generate go run github.com/cilium/ebpf/cmd/bpf2go -cc clang bpf sample.bpf.c -- -I/usr/include/ -O2 -g
 
 type eventBPF struct {
 	Pid   uint32
@@ -68,6 +68,8 @@ func main() {
 
 	cmap = make(map[nskey]deets)
 
+	fmt.Printf("detected %d containers\n", len(containers))
+
 	for _, container := range containers {
 		inspect, _ := cli.ContainerInspect(context.Background(), container.ID)
 		c := deets{}
@@ -76,6 +78,8 @@ func main() {
 		c.ContainerName = strings.TrimLeft(inspect.Name, "/")
 		pid := strconv.Itoa(inspect.State.Pid)
 		c.ContainerPID = pid
+
+		fmt.Printf("container %s has been detected\n", c.ContainerName)
 
 		key := nskey{}
 
@@ -105,17 +109,46 @@ func main() {
 	}
 	defer objs.Close()
 
-	// kpc, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSoconn})
+	kpc, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSoconn})
+	if err != nil {
+		log.Fatalf("opening kprobe: %s", err)
+	}
+	defer kpc.Close()
+
+	kpcr, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSocketCreate})
+	if err != nil {
+		log.Fatalf("opening kprobe: %s", err)
+	}
+	defer kpcr.Close()
+
+	kpicr, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceInetConnRequest})
+	if err != nil {
+		log.Fatalf("opening kprobe: %s", err)
+	}
+	defer kpicr.Close()
+
+	kpskb, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSocketSockRcvSkb})
+	if err != nil {
+		log.Fatalf("opening kprobe: %s", err)
+	}
+	defer kpskb.Close()
+	// kpb, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSobind})
 	// if err != nil {
 	// 	log.Fatalf("opening kprobe: %s", err)
 	// }
-	// defer kpc.Close()
+	// defer kpb.Close()
 
 	kpa, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceSoacc})
 	if err != nil {
 		log.Fatalf("opening kprobe: %s", err)
 	}
 	defer kpa.Close()
+
+	ksn, err := link.AttachLSM(link.LSMOptions{Program: objs.EnforceGetsockname})
+	if err != nil {
+		log.Fatalf("opening kprobe: %s", err)
+	}
+	defer ksn.Close()
 
 	rd, err := ringbuf.NewReader(objs.Events)
 	if err != nil {
